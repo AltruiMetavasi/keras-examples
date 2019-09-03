@@ -62,7 +62,7 @@ set.seed(100)
 val_split <- initial_split(training(test_split), prop = 0.8, strata = "attrition")
 
 # quick check
-val_split
+test_split
 ```
 
 ### Defining Preprocess Recipe
