@@ -1,0 +1,349 @@
+---
+title: "Model Fitting and Evaluation"
+author: "R. Dimas Bagas Herlambang"
+date: "`r format(Sys.Date(), '%B %e, %Y')`"
+output:
+  html_document:
+    theme: cosmo
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+# clear-up the environment
+rm(list = ls())
+
+# chunk options
+knitr::opts_chunk$set(
+  message = FALSE,
+  warning = FALSE,
+  fig.asp = 0.5625,
+  fig.align = "center",
+  out.width = "85%",
+  comment = "#>"
+)
+
+# import libs
+library(deepviz)
+library(glue)
+library(keras)
+library(lime)
+library(magick)
+library(plotly)
+library(tidyverse)
+library(tidymodels)
+```
+
+## Data Preparation
+
+### Prepare Data Generator
+
+```{r data-meta}
+# import dataset
+data_train <- read_csv("data/data-train.csv")
+data_val <- read_csv("data/data-val.csv")
+data_test <- read_csv("data/data-test.csv")
+
+# quick check
+head(data_train, 10)
+```
+
+```{r data-meta-readjust}
+# convert class to character
+data_train <- data_train %>% 
+  mutate(class = as.character(class))
+
+data_val <- data_val %>% 
+  mutate(class = as.character(class))
+
+data_test <- data_test %>% 
+  mutate(class = as.character(class))
+
+# get all classes
+classes <- unique(data_train$class)
+```
+
+```{r data-generator}
+# set data parameter
+image_size <- c(128, 128)
+batch_size <- 32
+
+# image generator
+seen_image_gen = image_data_generator(
+  rescale = 1/255,
+  rotation_range = 45,
+  width_shift_range = 0.1,
+  height_shift_range = 0.1,
+  shear_range = 0.1,
+  zoom_range = 0.1,
+  fill_mode = "nearest"
+)
+
+unseen_image_gen = image_data_generator(rescale = 1/255)
+
+# data generator
+train_gen <- flow_images_from_dataframe(
+  dataframe = data_train,
+  x_col = "path",
+  y_col = "class",
+  generator = seen_image_gen,
+  target_size = image_size,
+  color_mode = "grayscale",
+  class_mode = "categorical",
+  batch_size = batch_size,
+  shuffle = TRUE,
+  seed = 100
+)
+
+val_gen <- flow_images_from_dataframe(
+  dataframe = data_val,
+  x_col = "path",
+  y_col = "class",
+  generator = unseen_image_gen,
+  target_size = image_size,
+  color_mode = "grayscale",
+  class_mode = "categorical",
+  batch_size = batch_size,
+  shuffle = FALSE
+)
+
+test_gen <- flow_images_from_dataframe(
+  dataframe = data_test,
+  x_col = "path",
+  y_col = "class",
+  generator = unseen_image_gen,
+  target_size = image_size,
+  color_mode = "grayscale",
+  class_mode = "categorical",
+  batch_size = batch_size,
+  shuffle = FALSE
+)
+```
+
+## Model Fitting
+
+### Defining Model Architecture
+
+```{r model-arch}
+# define input
+input <- layer_input(name = "input", shape = c(image_size, 1))
+
+# define hidden layers
+hiddens <- input %>% 
+  layer_flatten(name = "dense_flatten") %>% 
+  layer_dense(name = "dense_1", units = 32) %>% 
+  layer_activation_leaky_relu(name = "dense_1_act") %>% 
+  layer_batch_normalization(name = "dense_1_bn") %>% 
+  layer_dropout(name = "dense_1_dp", rate = 0.05)
+
+# define output
+output <- hiddens %>% 
+  layer_dense(name = "output", units = length(classes)) %>% 
+  layer_batch_normalization(name = "output_bn") %>%
+  layer_activation(name = "output_act", activation = "softmax")
+
+# define full model
+model <- keras_model(inputs = input, outputs = output)
+
+# compile the model
+model %>% compile(
+  optimizer = "adam",
+  metrics = "accuracy",
+  loss = "categorical_crossentropy"
+)
+
+# model summary
+summary(model)
+```
+
+```{r model-arch-plot}
+# visualize model
+plot_model(model)
+```
+
+### Model Fitting
+
+```{r model-fit}
+# callbacks
+callbacks <- callback_tensorboard("logs/run_a")
+
+# meta
+steps_per_epoch <- ceiling(nrow(data_train) / batch_size)
+validation_steps <- ceiling(nrow(data_val) / batch_size)
+
+# fit the model
+history <- model %>% fit_generator(
+  generator = train_gen,
+  steps_per_epoch = steps_per_epoch,
+  epochs = 30,
+  validation_data = val_gen,
+  validation_steps = validation_steps,
+  callbacks = callbacks
+)
+
+# plot history
+plot(history)
+```
+
+## Model Evaluation
+
+### Predict on Test Dataset
+
+```{r eval-pred}
+# predict on test
+pred_test <- model %>% predict_generator(
+  generator = test_gen,
+  steps = ceiling(nrow(data_test) / batch_size)
+)
+
+pred_test <- pred_test %>% 
+  as_tibble(.name_repair = "universal") %>% 
+  set_names(classes)
+
+pred_test <- pred_test %>% 
+  mutate(class = apply(., 1, function(x) names(x)[which.max(x)])) %>% 
+  mutate(class = factor(class, levels = classes)) %>% 
+  set_names(paste0(".pred_", colnames(.)))
+
+# combine with test dataset
+pred_test <- data_test %>% 
+  select(class) %>% 
+  mutate(class = factor(class, levels = classes)) %>% 
+  bind_cols(pred_test)
+
+# quick check
+head(pred_test, 10)
+```
+
+### Confusion Matrix
+
+```{r eval-conf_mat}
+# confusion matrix
+pred_test %>%
+  conf_mat(class, .pred_class) %>%
+  autoplot(type = "heatmap")
+```
+
+```{r eval-conf_mat-summary}
+# metrics summary
+pred_test %>%
+  summarise(
+    accuracy = accuracy_vec(class, .pred_class),
+    sensitivity = sens_vec(class, .pred_class),
+    specificity = spec_vec(class, .pred_class),
+    precision = precision_vec(class, .pred_class)
+  )
+```
+
+### ROC Curve
+
+```{r eval-roc_curve}
+# plot roc curve
+pred_test %>%
+  roc_curve(class, .pred_0:.pred_9) %>%
+  autoplot()
+```
+
+```{r eval-roc_curve-trade_off}
+# get roc curve data on test dataset
+pred_test_roc <- pred_test %>%
+  roc_curve(class, .pred_0:.pred_9)
+
+# tidying
+pred_test_roc <- pred_test_roc %>% 
+  mutate_if(~ is.numeric(.), ~ round(., 4)) %>% 
+  gather(metric, value, -.level, -.threshold)
+
+# plot sensitivity-specificity trade-off
+p <- ggplot(pred_test_roc, aes(x = .threshold, y = value)) +
+  geom_line(aes(colour = metric)) +
+  facet_wrap(vars(.level), ncol = 3) +
+  labs(x = "Probability Threshold to be Classified as Positive", y = "Value", colour = "Metrics") +
+  theme_minimal()
+
+ggplotly(p)
+```
+
+### Precision-Recall Curve
+
+```{r eval-pr_curve}
+# plot pr curve
+pred_test %>%
+  pr_curve(class, .pred_0:.pred_9) %>%
+  autoplot()
+```
+
+```{r eval-pr_curve-trade_off}
+# get roc curve data on test dataset
+pred_test_pr <- pred_test %>%
+  pr_curve(class, .pred_0:.pred_9)
+
+# tidying
+pred_test_pr <- pred_test_pr %>% 
+  mutate_if(~ is.numeric(.), ~ round(., 4)) %>% 
+  gather(metric, value, -.level, -.threshold)
+
+# plot sensitivity-specificity trade-off
+p <- ggplot(pred_test_pr, aes(x = .threshold, y = value)) +
+  geom_line(aes(colour = metric)) +
+  facet_wrap(vars(.level), ncol = 3) +
+  labs(x = "Probability Threshold to be Classified as Positive", y = "Value", colour = "Metrics") +
+  theme_minimal()
+
+ggplotly(p)
+```
+
+## Model Audit
+
+### Explain Prediction
+
+```{r explain-sample}
+# image pat
+img_path <- "data/test/0/img_000001.jpg"
+
+# example image with superpixel
+plot_superpixels(img_path, n_superpixels = 32, colour = "blue")
+```
+
+```{r explain-explanation}
+# class list
+class_list <- set_names(classes, 1:length(classes))
+
+# image processor function
+img_prep <- function(x) {
+  
+  arrays <- lapply(x, function(path) {
+    
+    x <- image_load(path, target_size = image_size, grayscale = TRUE)
+    x <- image_to_array(x)
+    x <- array_reshape(x, c(1, dim(x)))
+    x <- x / 255
+    
+  })
+  
+  do.call(abind::abind, c(arrays, list(along = 1)))
+  
+}
+
+# set-up lime explainer
+explainer <- lime(
+  x = img_path,
+  model = as_classifier(model, class_list),
+  preprocess = img_prep
+)
+
+# get lime explanation
+explanation <- lime::explain(
+  x = img_path,
+  explainer = explainer,
+  n_labels = 1,
+  n_superpixels = 32,
+  n_features = 32
+)
+
+# plot lime's image explanation
+plot_image_explanation(explanation)
+```
