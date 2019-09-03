@@ -1,0 +1,263 @@
+---
+title: "Model Fitting and Evaluation"
+author: "R. Dimas Bagas Herlambang"
+date: "`r format(Sys.Date(), '%B %e, %Y')`"
+output:
+  html_document:
+    theme: cosmo
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+# clear-up the environment
+rm(list = ls())
+
+# chunk options
+knitr::opts_chunk$set(
+  message = FALSE,
+  warning = FALSE,
+  fig.asp = 0.5625,
+  fig.align = "center",
+  out.width = "85%",
+  comment = "#>"
+)
+
+# import libs
+library(keras)
+library(plotly)
+library(tidyverse)
+library(tidymodels)
+```
+
+## Data Preparation
+
+### Import Dataset
+
+```{r data-import}
+# import dataset
+data_clean <- read_csv("data/data-clean.csv")
+
+# quick check
+head(data_clean, 10)
+```
+
+## Data Preprocess
+
+### Cross-Validation Scheme
+
+```{r preproc-initial_split}
+# create initial split
+set.seed(100)
+
+test_split <- initial_split(data_clean, prop = 0.8, strata = "attrition")
+
+# create validation split
+set.seed(100)
+
+val_split <- initial_split(training(test_split), prop = 0.8, strata = "attrition")
+
+# quick check
+val_split
+```
+
+### Defining Preprocess Recipe
+
+```{r preproc-rec}
+# define preprocess recipe from train dataset
+rec <- recipe(attrition ~ ., data = training(val_split)) %>% 
+  step_rm(employee_count, employee_number) %>%
+  step_nzv(all_predictors()) %>% 
+  step_string2factor(all_nominal(), -attrition) %>%
+  step_string2factor(attrition, levels = c("yes", "no")) %>%
+  step_downsample(attrition, ratio = 1/1, seed = 100) %>%
+  step_center(all_numeric()) %>%
+  step_scale(all_numeric()) %>%
+  step_dummy(all_nominal(), -attrition, one_hot = FALSE) %>%
+  prep(strings_as_factors = FALSE)
+
+# get train-val-test dataset
+data_train <- juice(rec)
+data_val <- bake(rec, testing(val_split))
+data_test <- bake(rec, testing(test_split))
+
+# quick check
+head(data_train, 10)
+```
+
+```{r preproc-array}
+# prepare train arrays
+data_train_y <- to_categorical(as.numeric(data_train$attrition) - 1)
+
+data_train_x <- data_train %>% 
+  select(-matches("attrition")) %>% 
+  data.matrix()
+
+# prepare validation arrays
+data_val_y <- to_categorical(as.numeric(data_val$attrition) - 1)
+
+data_val_x <- data_val %>% 
+  select(-matches("attrition")) %>% 
+  data.matrix()
+
+# prepare test arrays
+data_test_y <- to_categorical(as.numeric(data_test$attrition) - 1)
+
+data_test_x <- data_test %>% 
+  select(-matches("attrition")) %>% 
+  data.matrix()
+
+# quick check
+dim(data_train_x)
+dim(data_train_y)
+```
+
+## Model Fitting
+
+### Defining Model Architecture
+
+```{r model-arch}
+# define input
+input <- layer_input(name = "input", shape = ncol(data_train_x))
+
+# define hidden layers
+hiddens <- input %>% 
+  layer_dense(name = "dense_1", units = 32) %>% 
+  layer_activation_leaky_relu(name = "dense_1_act") %>% 
+  layer_batch_normalization(name = "dense_1_bn") %>% 
+  layer_dropout(name = "dense_1_dp", rate = 0.05)
+
+# define output
+output <- hiddens %>% 
+  layer_dense(name = "output", units = ncol(data_train_y)) %>% 
+  layer_batch_normalization(name = "output_bn") %>%
+  layer_activation(name = "output_act", activation = "sigmoid")
+
+# define full model
+model <- keras_model(inputs = input, outputs = output)
+
+# compile the model
+model %>% compile(
+  optimizer = "adam",
+  metrics = "accuracy",
+  loss = "binary_crossentropy"
+)
+
+# model summary
+summary(model)
+```
+
+### Model Fitting
+
+```{r model-fit}
+# fit the model
+history <- model %>% fit(
+  x = data_train_x,
+  y = data_train_y,
+  batch_size = 32,
+  epochs = 30,
+  validation_data = list(
+    data_val_x,
+    data_val_y
+  )
+)
+
+# plot history
+plot(history)
+```
+
+## Model Evaluation
+
+### Predict on Test Dataset
+
+```{r eval-pred}
+# predict on test
+pred_test <- predict(model, data_test_x) %>% 
+  as_tibble(.name_repair = "universal") %>% 
+  set_names(levels(data_train$attrition)) %>% 
+  mutate(class = ifelse(yes > 0.5, "yes", "no")) %>% 
+  mutate(class = factor(class, levels = levels(data_train$attrition))) %>% 
+  set_names(paste0(".pred_", colnames(.)))
+
+# combine with test dataset
+pred_test <- bind_cols(data_test, pred_test)
+```
+
+### Confusion Matrix
+
+```{r eval-conf_mat}
+# confusion matrix
+pred_test %>%
+  conf_mat(attrition, .pred_class) %>%
+  autoplot(type = "heatmap")
+```
+
+```{r eval-conf_mat-summary}
+# metrics summary
+pred_test %>%
+  summarise(
+    accuracy = accuracy_vec(attrition, .pred_class),
+    sensitivity = sens_vec(attrition, .pred_class),
+    specificity = spec_vec(attrition, .pred_class),
+    precision = precision_vec(attrition, .pred_class)
+  )
+```
+
+### ROC Curve
+
+```{r eval-roc_curve}
+# plot roc curve
+pred_test %>%
+  roc_curve(attrition, .pred_yes) %>%
+  autoplot()
+```
+
+```{r eval-roc_curve-trade_off}
+# get roc curve data on test dataset
+pred_test_roc <- pred_test %>%
+  roc_curve(attrition, .pred_yes)
+
+# tidying
+pred_test_roc <- pred_test_roc %>% 
+  mutate_if(~ is.numeric(.), ~ round(., 4)) %>% 
+  gather(metric, value, -.threshold)
+
+# plot sensitivity-specificity trade-off
+p <- ggplot(pred_test_roc, aes(x = .threshold, y = value)) +
+  geom_line(aes(colour = metric)) +
+  labs(x = "Probability Threshold to be Classified as Positive", y = "Value", colour = "Metrics") +
+  theme_minimal()
+
+ggplotly(p)
+```
+
+### Precision-Recall Curve
+
+```{r eval-pr_curve}
+# plot pr curve
+pred_test %>%
+  pr_curve(attrition, .pred_yes) %>%
+  autoplot()
+```
+
+```{r eval-pr_curve-trade_off}
+# get pr curve data on test dataset
+pred_test_pr <- pred_test %>%
+  pr_curve(attrition, .pred_yes)
+
+# tidying
+pred_test_pr <- pred_test_pr %>% 
+  mutate_if(~ is.numeric(.), ~ round(., 4)) %>% 
+  gather(metric, value, -.threshold)
+
+# plot recall-precision trade-off
+p <- ggplot(pred_test_pr, aes(x = .threshold, y = value)) +
+  geom_line(aes(colour = metric)) +
+  labs(x = "Probability Threshold to be Classified as Positive", y = "Value", colour = "Metrics") +
+  theme_minimal()
+
+ggplotly(p)
+```
