@@ -27,6 +27,7 @@ knitr::opts_chunk$set(
 )
 
 # import libs
+library(deepviz)
 library(keras)
 library(plotly)
 library(tidyverse)
@@ -150,9 +151,17 @@ model %>% compile(
 summary(model)
 ```
 
+```{r model-arch-plot}
+# visualize model
+plot_model(model)
+```
+
 ### Model Fitting
 
 ```{r model-fit}
+# callbacks
+callbacks <- callback_tensorboard("logs/run_a")
+
 # fit the model
 history <- model %>% fit(
   x = data_train_x,
@@ -162,7 +171,8 @@ history <- model %>% fit(
   validation_data = list(
     data_val_x,
     data_val_y
-  )
+  ),
+  callbacks = callbacks
 )
 
 # plot history
@@ -183,7 +193,12 @@ pred_test <- predict(model, data_test_x) %>%
   set_names(paste0(".pred_", colnames(.)))
 
 # combine with test dataset
-pred_test <- bind_cols(data_test, pred_test)
+pred_test <- data_test %>% 
+  select(attrition) %>% 
+  bind_cols(pred_test)
+
+# quick check
+head(pred_test, 10)
 ```
 
 ### Confusion Matrix
