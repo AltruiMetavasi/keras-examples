@@ -68,13 +68,13 @@ classes <- unique(data_train$class)
 
 ```{r data-generator}
 # set data parameter
-image_size <- c(128, 128)
+image_size <- c(28, 28)
 batch_size <- 32
 
 # image generator
 seen_image_gen = image_data_generator(
-  rescale = 1/255,
-  rotation_range = 45,
+  rescale = 1 / 255,
+  rotation_range = 15,
   width_shift_range = 0.1,
   height_shift_range = 0.1,
   shear_range = 0.1,
@@ -82,7 +82,7 @@ seen_image_gen = image_data_generator(
   fill_mode = "nearest"
 )
 
-unseen_image_gen = image_data_generator(rescale = 1/255)
+unseen_image_gen = image_data_generator(rescale = 1 / 255)
 
 # data generator
 train_gen <- flow_images_from_dataframe(
@@ -183,6 +183,9 @@ history <- model %>% fit_generator(
   validation_steps = validation_steps,
   callbacks = callbacks
 )
+
+# save the model
+save_model_hdf5(model, "models/final-model.hdf5")
 
 # plot history
 plot(history)
@@ -345,5 +348,15 @@ explanation <- lime::explain(
 )
 
 # plot lime's image explanation
-plot_image_explanation(explanation)
+plot_image_explanation(explanation, display = "block")
+```
+
+<!-- on exit -->
+
+```{r on-exit, include=FALSE}
+# clear-up tensorboard
+tensorboard_files <- list.files("logs/run_a", full.names = TRUE)
+tensorboard_files <- tensorboard_files[-length(tensorboard_files)]
+
+unlink(tensorboard_files, force = TRUE)
 ```
