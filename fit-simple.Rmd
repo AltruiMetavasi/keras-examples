@@ -320,3 +320,11 @@ explanation <- lime::explain(
 # plot feature explanation
 plot_features(explanation, cases = 1, ncol = 1)
 ```
+
+<!-- on exit -->
+
+```{r on-exit, include=FALSE}
+# clear-up tensorboard
+tensorboard_files <- list.files("logs/run_a", full.names = TRUE)
+tensorboard_files <- tensorboard_files[-length(tensorboard_files)]
+unlink(tensorboard_files, force = TRUE)
