@@ -20,15 +20,14 @@ rm(list = ls())
 knitr::opts_chunk$set(
   message = FALSE,
   warning = FALSE,
-  fig.asp = 0.5625,
   fig.align = "center",
-  out.width = "85%",
   comment = "#>"
 )
 
 # import libs
 library(deepviz)
 library(keras)
+library(lime)
 library(plotly)
 library(tidyverse)
 library(tidymodels)
@@ -94,21 +93,21 @@ head(data_train, 10)
 data_train_y <- to_categorical(as.numeric(data_train$attrition) - 1)
 
 data_train_x <- data_train %>% 
-  select(-matches("attrition")) %>% 
+  select(-attrition) %>% 
   data.matrix()
 
 # prepare validation arrays
 data_val_y <- to_categorical(as.numeric(data_val$attrition) - 1)
 
 data_val_x <- data_val %>% 
-  select(-matches("attrition")) %>% 
+  select(-attrition) %>% 
   data.matrix()
 
 # prepare test arrays
 data_test_y <- to_categorical(as.numeric(data_test$attrition) - 1)
 
 data_test_x <- data_test %>% 
-  select(-matches("attrition")) %>% 
+  select(-attrition) %>% 
   data.matrix()
 
 # quick check
@@ -126,10 +125,14 @@ input <- layer_input(name = "input", shape = ncol(data_train_x))
 
 # define hidden layers
 hiddens <- input %>% 
-  layer_dense(name = "dense_1", units = 32) %>% 
+  layer_dense(name = "dense_1", units = 64) %>% 
   layer_activation_leaky_relu(name = "dense_1_act") %>% 
   layer_batch_normalization(name = "dense_1_bn") %>% 
-  layer_dropout(name = "dense_1_dp", rate = 0.05)
+  layer_dropout(name = "dense_1_dp", rate = 0.15) %>% 
+  layer_dense(name = "dense_2", units = 32) %>% 
+  layer_activation_leaky_relu(name = "dense_2_act") %>% 
+  layer_batch_normalization(name = "dense_2_bn") %>% 
+  layer_dropout(name = "dense_2_dp", rate = 0.15)
 
 # define output
 output <- hiddens %>% 
@@ -142,7 +145,7 @@ model <- keras_model(inputs = input, outputs = output)
 
 # compile the model
 model %>% compile(
-  optimizer = "adam",
+  optimizer = optimizer_adam(lr = 0.001),
   metrics = "accuracy",
   loss = "binary_crossentropy"
 )
@@ -166,7 +169,7 @@ callbacks <- callback_tensorboard("logs/run_a")
 history <- model %>% fit(
   x = data_train_x,
   y = data_train_y,
-  batch_size = 32,
+  batch_size = 64,
   epochs = 30,
   validation_data = list(
     data_val_x,
@@ -185,8 +188,7 @@ plot(history)
 
 ```{r eval-pred}
 # predict on test
-pred_test <- predict(model, data_test_x) %>% 
-  as_tibble(.name_repair = "universal") %>% 
+pred_test <- as_tibble(predict(model, data_test_x)) %>% 
   set_names(levels(data_train$attrition)) %>% 
   mutate(class = ifelse(yes > 0.5, "yes", "no")) %>% 
   mutate(class = factor(class, levels = levels(data_train$attrition))) %>% 
@@ -275,4 +277,46 @@ p <- ggplot(pred_test_pr, aes(x = .threshold, y = value)) +
   theme_minimal()
 
 ggplotly(p)
+```
+
+## Model Audit
+
+```{r explain-sample}
+# choose explanation data
+data_explain <- head(testing(test_split), 10)
+
+# quick check
+data_explain
+```
+
+```{r explain-prep}
+# set-up preprocess function
+get_features <- function(x) {
+  
+  data.matrix(bake(rec, x, -attrition))
+  
+}
+
+# set-up model as lime's classifier
+lime_model <- as_classifier(model, levels(data_train$attrition))
+```
+
+```{r explain-explain}
+# set-up lime explainer
+explainer <- lime(
+  x = data_explain,
+  model = lime_model,
+  preprocess = get_features
+)
+
+# get lime explanation
+explanation <- lime::explain(
+  x = data_explain,
+  explainer = explainer,
+  n_labels = 2,
+  n_features = 5
+)
+
+# plot feature explanation
+plot_features(explanation, cases = 1, ncol = 1)
 ```
